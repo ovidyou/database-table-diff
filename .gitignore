@@ -1,0 +1,17 @@
+# Ignore OS junk files
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+# Icon must ends with two \r.
+Icon
+
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Ignore other files and folders
+.idea/
+.settings/
+*.log
+*.project
