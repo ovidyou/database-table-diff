@@ -1,7 +1,7 @@
 # Database Table Diff
 ##### A quick way to compare databases from multiple sources (MySQL, PostgreSQL, SQLite) and see differences between table structures.
 ---
-Current status: compares only table names from databases.
+Current status: compares table names and tables column names.
 
 ## Features
 - Saves time comparing database table structures
@@ -25,7 +25,7 @@ This software is licenced under the [GPL 3](http://www.gnu.org/licenses/gpl.html
 
 ## Setup / Configuration
 
-Before you can use it, you need to ensure you have the [PDO](http://php.net/manual/en/book.pdo.php) Extension installed on your server.
+Before you can use it, you need to ensure you have the proper [PDO drivers](http://php.net/manual/en/pdo.drivers.php) installed.
 
 Then you can just copy the files under this project into a folder that is accessible to a web server, so you can run it in your browser.
 
@@ -69,6 +69,5 @@ print $DTD->getFormattedTablesDiff();
 
 ## TODO
 
-- Add column names diff for tables
 - Add column properties diff for tables
 - Support more database engines

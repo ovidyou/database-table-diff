@@ -14,11 +14,11 @@ class DatabaseTableDiff {
   // Array with database connections.
   private $connections;
 
-  // Key representing current connection.
-  private $key;
+  // Key representing current database connection.
+  private $dbKey;
 
-  // Array storing tables for all databases;
-  private $tables;
+  // Key representing main database.
+  private $mainDbKey;
 
   /**
    * Constructor
@@ -35,15 +35,15 @@ class DatabaseTableDiff {
    * Check configuration.
    */
   private function checkConfiguration() {
-    foreach($this->databases as $key => &$dbConfig) {
+    foreach($this->databases as $dbKey => &$dbConfig) {
       if (empty($dbConfig['driver'])) {
-        throw new Exception("Invalid database configuration: 'driver' key is mandatory.");
+        throw new Exception("Invalid database configuration: 'driver' dbKey is mandatory.");
       }
       if (!in_array($dbConfig['driver'], array('sql', 'mysql', 'pgsql', 'sqlite'))) {
         throw new Exception("Invalid database configuration: driver '${dbConfig['driver']}' is not supported.");
       }
       if (empty($dbConfig['dbname'])) {
-        throw new Exception("Invalid database configuration: 'dbname' key is mandatory.");
+        throw new Exception("Invalid database configuration: 'dbname' dbKey is mandatory.");
       }
       // SQLite doesn't need other configuration options.
       if ($dbConfig['driver'] == 'sqlite') {
@@ -52,7 +52,7 @@ class DatabaseTableDiff {
         continue;
       }
       if (empty($dbConfig['user'])) {
-        throw new Exception("Invalid database configuration: 'user' key is mandatory.");
+        throw new Exception("Invalid database configuration: 'user' dbKey is mandatory.");
       }
       if (empty($dbConfig['dsn']) && empty($dbConfig['host']) && empty($dbConfig['unix_host'])) {
         throw new Exception("Invalid database configuration: missing one of the mutually exclusive keys: 'dsn', 'unix_host' or 'host'.");
@@ -64,20 +64,21 @@ class DatabaseTableDiff {
    * Connect to all databases.
    */
   private function connect() {
-    foreach($this->databases as $key => $dbConfig) {
+    foreach($this->databases as $dbKey => $dbConfig) {
       $dsn = $this->getDSN($dbConfig);
       $user = $dbConfig['user'];
       $pass = isset($dbConfig['pass']) ? $dbConfig['pass'] : '';
 
       try {
-        $this->connections[$key] = new PDO($dsn, $user, $pass);
+        $this->connections[$dbKey] = new PDO($dsn, $user, $pass);
       } catch (Exception $e) {
-        throw new Exception("Could not connect to database '$key'." . $e->getMessage());
+        throw new Exception("Could not connect to database '$dbKey'." . $e->getMessage());
       }
 
-      // Set current connection key to match the first database.
-      if (!$this->key) {
-        $this->setKey($key);
+      // Set current connection dbKey to match the first database.
+      if (!$this->dbKey) {
+        $this->setDbKey($dbKey);
+        $this->mainDbKey = $dbKey;
       }
     }
   }
@@ -88,7 +89,7 @@ class DatabaseTableDiff {
    * @return PDO instance
    */
   private function db() {
-    return $this->connections[$this->key];
+    return $this->connections[$this->dbKey];
   }
 
   /**
@@ -119,21 +120,12 @@ class DatabaseTableDiff {
   }
 
   /**
-   * Returns the driver of the active database.
-   *
-   * @return string
-   */
-  private function getActiveDriver() {
-    return $this->databases[$this->key]['driver'];
-  }
-
-  /**
    * Returns the configuration of the active database.
    *
    * @return array
    */
   private function getActiveDbConfig() {
-    return $this->databases[$this->key];
+    return $this->databases[$this->dbKey];
   }
 
   /**
@@ -161,31 +153,59 @@ class DatabaseTableDiff {
   }
 
   /**
-   * Gets all tables from all configured databases,
-   * or from a single database when $key is specified.
+   * Returns the SQL statement for selecting all columns in a table.
    *
-   * @param string $key
+   * @param $table - Table name
+   *
+   * @return string
+   */
+  private function getTableColumnsSql($table) {
+    $dbConfig = $this->getActiveDbConfig();
+
+    switch($dbConfig['driver']) {
+      case 'mysql':
+      case 'sql':
+        return "SHOW COLUMNS FROM $table";
+
+      case 'pgsql':
+        return "SELECT column_name FROM information_schema.columns WHERE table_name ='$table'";
+
+      case 'sqlite':
+        return "PRAGMA table_info('$table')";
+    }
+  }
+
+  /**
+   * Gets all tables from all configured databases,
+   * or from a single database when $dbKey is specified.
+   *
+   * @param string $dbKey
    *
    * @return array
    */
-  public function getTables($key = '') {
-    if ($key) {
-      $this->setKey($key);
+  public function getTables($dbKey = '') {
+    static $tables;
+
+    if ($dbKey) {
+      $this->setDbKey($dbKey);
       $sql = $this->getTablesSql();
       $query = $this->db()->query($sql);
-      return $query->fetchAll(PDO::FETCH_COLUMN);
+      $keyTables = $query->fetchAll(PDO::FETCH_COLUMN);
+      asort($keyTables);
+      return $keyTables;
     }
-    else {
-      if (!empty($this->tables)) {
-        return $this->tables;
-      }
-      $tables = array();
-      foreach ($this->databases as $key => $dbConfig) {
-        $tables[$key] = $this->getTables($key);
-      }
-      $this->tables = $tables;
+
+    if (isset($tables)) {
       return $tables;
     }
+
+    $tables = array();
+
+    foreach ($this->databases as $dbKey => $dbConfig) {
+      $tables[$dbKey] = $this->getTables($dbKey);
+    }
+
+    return $tables;
   }
 
   /**
@@ -194,15 +214,20 @@ class DatabaseTableDiff {
    * @return array
    */
   public function getTablesDiff() {
-    $tables = !empty($this->tables) ? $this->tables : $this->getTables();
+    static $diffArr;
+
+    if (isset($difArr)) {
+      return $diffArr;
+    }
+
+    $tables = $this->getTables();
     $diffArr = array();
 
-    $keys = array_keys($this->databases);
-    $main_db_key = array_shift($keys);
-    $main_db_tables = array_shift($tables);
+    $main_db_tables = $tables[$this->mainDbKey];
+    unset($tables[$this->mainDbKey]);
 
     foreach ($tables as $key => $tableArr) {
-      $diffArr[$main_db_key . '#' . $key] = array(
+      $diffArr[$this->mainDbKey . '#' . $key] = array(
         'left' => array_diff($main_db_tables, $tableArr),
         'right' => array_diff($tableArr, $main_db_tables),
       );
@@ -219,10 +244,11 @@ class DatabaseTableDiff {
    * @return string
    */
   public function getFormattedTablesDiff($htmlOutput = TRUE) {
-    $diffArr = $this->getTablesDiff();
+    $tablesDiffArr = $this->getTablesDiff();
+    $columnsDiffArr = $this->getTableColumnsDiff();
     $output = '';
 
-    foreach ($diffArr as $key => $diff) {
+    foreach ($tablesDiffArr as $key => $diff) {
       $dbNames = explode('#', $key);
       $leftDB = $dbNames[0];
       $rightDB = $dbNames[1];
@@ -234,29 +260,143 @@ class DatabaseTableDiff {
       $rightTables = implode('<br>+ ', $diff['right']);
 
       if ($leftTables) {
-        $leftTables = '<div style="color: darkred">- ' . $leftTables . '</div>';
+        $leftTables = '<div style="color: darkred; margin-left: 20px;">- ' . $leftTables . '</div>';
       }
 
       if ($rightTables) {
-        $rightTables = '<div style="color: darkgreen">+ ' . $rightTables . '</div>';
+        $rightTables = '<div style="color: darkgreen; margin-left: 20px;">+ ' . $rightTables . '</div>';
       }
 
+      $columnsDiffOutput = '';
+
+      foreach ($columnsDiffArr[$key] as $tableName => $columnsDiff) {
+        asort($columnsDiff['left']);
+        asort($columnsDiff['right']);
+
+        $leftColumns = implode('<br>- ', $columnsDiff['left']);
+        $rightColumns = implode('<br>+ ', $columnsDiff['right']);
+
+        $columnsDiffOutput .= "<div>{<b>$tableName</b>}</div>";
+
+        if ($leftColumns) {
+          $columnsDiffOutput .= '<div style="color: darkred; margin-left: 20px;">- ' . $leftColumns . '</div>';
+        }
+
+        if ($rightColumns) {
+          $columnsDiffOutput .= '<div style="color: darkgreen; margin-left: 20px;">- ' . $rightColumns . '</div>';
+        }
+
+        $columnsDiffOutput .= "<br>";
+
+      }
+
+      if ($columnsDiffOutput) {
+        $columnsDiffOutput = '<div style="margin-left: 20px;">' . $columnsDiffOutput . '</div>';
+      }
+      else {
+        $columnsDiffOutput = 'No difference has been found.';
+      }
+
+
+
       $output .= <<<EOT
-<h3 style="font-weight: normal"><strong>$rightDB</strong> tables compared to <strong>$leftDB</strong> tables</h3>
+<h3 style="font-weight: normal"><strong>$rightDB</strong> vs. <strong>$leftDB</strong></h3>
+<br><h4 style="margin-left: 20px;">TABLES DIFF:</h4>
 $leftTables
 $rightTables<br><br>
+<h4 style="margin-left: 20px;">COLUMNS DIFF:</h4>
+$columnsDiffOutput<br><br>
 EOT;
     }
 
     if (!$htmlOutput) {
       $output = str_replace('<br>', "\n", $output);
       $output = str_replace('</h3>', "\n", $output);
+      $output = str_replace('</h4>', "\n", $output);
+      $output = str_replace('</div>', "\n", $output);
       $output = str_replace('<strong>', "'", $output);
       $output = str_replace('</strong>', "'", $output);
       $output = strip_tags($output);
     }
 
     return $output;
+  }
+
+  /**
+   * Returns the column names for the specified table of the active database.
+   *
+   * @param $table
+   *
+   * @return array
+   */
+  public function getTableColumns($table) {
+    $sql = $this->getTableColumnsSql($table);
+    $query = $this->db()->query($sql);
+    return $query->fetchAll(PDO::FETCH_COLUMN);
+  }
+
+  /**
+   * Retrieves the column names for all tables of all databases.
+   *
+   * @return array
+   */
+  public function getAllTableColumns() {
+    static $allTableColumns;
+
+    if (isset($allTableColumns)) {
+      return $allTableColumns;
+    }
+
+    $tables = $this->getTables();
+    $allTableColumns = array();
+
+    foreach($tables as $key => $tableArr) {
+      $allTableColumns[$key] = array();
+      $this->setDbKey($key);
+
+      foreach ($tableArr as $k => $tableName) {
+        $allTableColumns[$key][$tableName] = $this->getTableColumns($tableName);
+      }
+    }
+    return $allTableColumns;
+  }
+
+  /**
+   * Returns the diff between the tables of main database and other databases.
+   *
+   * @return array
+   */
+  public function getTableColumnsDiff() {
+    static $diffArr;
+
+    if (isset($diffArr)) {
+      return $diffArr;
+    }
+
+    $diffArr = array();
+    $allTableColumns = $this->getAllTableColumns();
+
+    $mainDbTableColumns = $allTableColumns[$this->mainDbKey];
+    unset($allTableColumns[$this->mainDbKey]);
+
+    foreach ($allTableColumns as $dbKey => $tableArr) {
+      $intersectArr = array_intersect(array_keys($mainDbTableColumns), array_keys($tableArr));
+      $diffArr[$this->mainDbKey . '#' . $dbKey] = array();
+
+      foreach($intersectArr as $k => $tableName) {
+        $leftDiff = array_diff($mainDbTableColumns[$tableName], $tableArr[$tableName]);
+        $rightDiff = array_diff($tableArr[$tableName], $mainDbTableColumns[$tableName]);
+
+        if (!empty($leftDiff) || !empty($rightDiff)) {
+          $diffArr[$this->mainDbKey . '#' . $dbKey][$tableName] = array(
+            'left' => $leftDiff,
+            'right' => $rightDiff,
+          );
+        }
+      }
+    }
+
+    return $diffArr;
   }
 
   /**
@@ -269,15 +409,15 @@ EOT;
   }
 
   /**
-   * Sets the active key.
+   * Sets the active dbKey.
    *
-   * @param $key
+   * @param $dbKey
    */
-  public function setKey($key) {
-    if (!isset($this->databases[$key])) {
-      throw new Exception("Invalid key specified: '$key'");
+  public function setDbKey($dbKey) {
+    if (!isset($this->databases[$dbKey])) {
+      throw new Exception("Invalid dbKey specified: '$dbKey'");
     }
-    $this->key = $key;
+    $this->dbKey = $dbKey;
   }
 
 }
